@@ -4,6 +4,6 @@
 # VS Code
 .vscode/
 
-images/
+images/*
 *.qcow2
 
