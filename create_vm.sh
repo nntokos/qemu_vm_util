@@ -144,7 +144,7 @@ else
 fi
 
 # VM paths
-VMDIR="./$VMNAME"
+VMDIR="./images"
 DISK="$VMDIR/$VMNAME.qcow2"
 mkdir -p "$VMDIR"
 

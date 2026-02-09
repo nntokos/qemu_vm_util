@@ -21,7 +21,7 @@ It is especially suited for **OS development, testing, and automation**.
 |------|--------|
 | `install-qemu.sh` | Install QEMU and dependencies (auto-detects OS + CPU) |
 | `create-vm.sh` | Create a new VM disk and boot an installer ISO |
-| `run-test-vm.sh` | Start an existing VM disk (no cloning, no reinstall) |
+| `start_vm.sh` | Start an existing VM disk (no cloning, no reinstall) |
 
 ---
 
@@ -85,16 +85,16 @@ Notes:
 
 After installation completes, do not use create-vm.sh again.
 
-Use run-test-vm.sh to boot the existing disk image.
+Use start_vm.sh to boot the existing disk image.
 
 ### Basic start
 ```sh
-./run-test-vm.sh ./ubuntu24/ubuntu24.qcow2
+./start_vm.sh ./ubuntu24/ubuntu24.qcow2
 ```
 
 ### With options
 ```sh
-./run-test-vm.sh ./ubuntu24/ubuntu24.qcow2 \
+./start_vm.sh ./ubuntu24/ubuntu24.qcow2 \
   --name ubuntu24-test \
   --memory 8192 \
   --cpus 4 \
