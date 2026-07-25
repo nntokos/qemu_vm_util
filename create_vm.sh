@@ -10,6 +10,10 @@ info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 fail()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/config.sh
+source "$SCRIPT_DIR/lib/config.sh"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -29,6 +33,9 @@ Options:
   --no-accel          Force pure emulation (TCG), even if KVM/HVF is available
   --headless          No GUI window (uses serial console); best for servers
   --ssh-port N        Host port forwarded to guest 22 (default: 2222)
+  --config PATH       YAML config profile to load defaults from (-f also works).
+                      Default: ./config/default.yaml if present.
+                      CLI flags always override the config file.
   -h, --help          Show this help
 
 What this script does:
@@ -46,23 +53,27 @@ Notes:
 EOF
 }
 
-# Defaults
-DISK_GB=32
-RAM_MB=4096
-CPUS=4
-AUTOINSTALL_ISO=""
-EFI_FIRMWARE=""
-REPO_EFI="./efi/QEMU_EFI.fd"
-NO_ACCEL=0
-HEADLESS=0
-SSH_PORT=2222
-
 # Parse required positional args
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && usage && exit 0
 [[ $# -lt 2 ]] && usage && exit 1
 
 ISO="$1"; shift
 VMNAME="$1"; shift
+
+CONFIG_FILE="$(resolve_config_file "$SCRIPT_DIR/config/default.yaml" "$@")"
+CONFIG_SECTION="create_vm"
+[[ -n "$CONFIG_FILE" ]] && info "Using config profile: $CONFIG_FILE"
+
+# Defaults (config profile overrides these; CLI flags override the config profile)
+DISK_GB="$(cfg_get disk_gb 32)"
+RAM_MB="$(cfg_get ram_mb 4096)"
+CPUS="$(cfg_get cpus 4)"
+AUTOINSTALL_ISO="$(cfg_get autoinstall_iso "")"
+EFI_FIRMWARE="$(cfg_get efi "")"
+REPO_EFI="./efi/QEMU_EFI.fd"
+NO_ACCEL="$(cfg_get_bool no_accel 0)"
+HEADLESS="$(cfg_get_bool headless 0)"
+SSH_PORT="$(cfg_get ssh_port 2222)"
 
 # Parse named options
 while [[ $# -gt 0 ]]; do
@@ -75,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     --no-accel) NO_ACCEL=1;;
     --headless) HEADLESS=1;;
     --ssh-port) shift; SSH_PORT="${1:-}";;
+    --config|-f) shift;; # already resolved above
     -h|--help) usage; exit 0;;
     *) fail "Unknown option: $1 (use --help)";;
   esac
@@ -183,7 +195,13 @@ UEFI_ARGS=()
 
 if [[ "$HOST_ARCH" == "x86_64" ]]; then
   MACHINE_ARGS=(-machine q35)
-  CPU_ARGS=(-cpu host)
+
+  # Prefer -cpu host when we have hardware accel; otherwise choose a safe emulated CPU.
+  if [[ "${ACCEL_ARGS[*]}" =~ (kvm|hvf) ]]; then
+    CPU_ARGS=(-cpu host)
+  else
+    CPU_ARGS=(-cpu qemu64)
+  fi
 else
   MACHINE_ARGS=(-machine virt)
 

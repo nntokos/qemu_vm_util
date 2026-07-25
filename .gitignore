@@ -4,4 +4,6 @@
 # VS Code
 .vscode/
 
+# Large images
+*.iso
 *.qcow2

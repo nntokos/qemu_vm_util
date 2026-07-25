@@ -1,0 +1,31 @@
+# Default configuration profile for create_vm.sh and start_vm.sh.
+#
+# Precedence: CLI flag > this file > the script's own built-in default.
+# Loaded automatically from ./config/default.yaml if present; point at a
+# different profile with --config <path> (see config/profiles/ for examples).
+#
+# Every key below is null, meaning "defer to the script's built-in default".
+# Uncomment and set a value to override it.
+
+# Shared across create_vm.sh and start_vm.sh; script-specific sections below
+# take priority over these when both define the same key.
+common:
+  cpus: null
+  ssh_port: null
+  efi: null
+
+create_vm:
+  disk_gb: null
+  ram_mb: null
+  cpus: null
+  ssh_port: null
+  efi: null
+  autoinstall_iso: null
+  headless: null
+  no_accel: null
+
+start_vm:
+  memory: null
+  cpus: null
+  ssh_port: null
+  efi: null

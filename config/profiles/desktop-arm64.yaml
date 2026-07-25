@@ -1,0 +1,13 @@
+# Example profile: a beefier ARM64 desktop VM.
+# Use with: ./create_vm.sh ubuntu-24.04-desktop-arm64.iso ubuntu24 --config config/profiles/desktop-arm64.yaml
+
+common:
+  cpus: 6
+  ssh_port: 2222
+
+create_vm:
+  disk_gb: 64
+  ram_mb: 8192
+
+start_vm:
+  memory: 8192

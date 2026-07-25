@@ -16,6 +16,9 @@
 #   -d, --shared-dir DIR Directory to mount in VM (can be specified multiple times)
 #       --efi PATH       Path to EFI/UEFI firmware (QEMU_EFI.fd).
 #                        Default: ./efi/QEMU_EFI.fd (relative to script directory)
+#   --config PATH, -f    YAML config profile to load defaults from.
+#                        Default: ./config/default.yaml if present.
+#                        CLI flags always override the config file.
 #   -h, --help           Show this help message
 #
 # Example:
@@ -30,18 +33,15 @@ set -euo pipefail
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-# EFI default (repo-relative)
-REPO_EFI_DEFAULT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/efi/QEMU_EFI.fd"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/config.sh
+source "$SCRIPT_DIR/lib/config.sh"
 
-# Defaults
-VM_NAME="test-$(date +%Y%m%d-%H%M%S)"
-MEMORY=4096
-CPUS=2
-SSH_PORT=2222
+# EFI default (repo-first)
+REPO_EFI_DEFAULT="$SCRIPT_DIR/efi/QEMU_EFI.fd"
+
+# Defaults (overridden below by config profile, then by CLI flags)
 SHARED_DIRS=()
-
-# Optional override; defaults to repo EFI
-UEFI_FIRMWARE="$REPO_EFI_DEFAULT"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -207,6 +207,17 @@ fi
 IMAGE_PATH="$1"
 shift
 
+CONFIG_FILE="$(resolve_config_file "$SCRIPT_DIR/config/default.yaml" "$@")"
+CONFIG_SECTION="start_vm"
+[[ -n "$CONFIG_FILE" ]] && log_info "Using config profile: $CONFIG_FILE"
+
+# Defaults (config profile overrides these; CLI flags override the config profile)
+VM_NAME="$(cfg_get name "test-$(date +%Y%m%d-%H%M%S)")"
+MEMORY="$(cfg_get memory 4096)"
+CPUS="$(cfg_get cpus 2)"
+SSH_PORT="$(cfg_get ssh_port 2222)"
+UEFI_FIRMWARE="$(cfg_get efi "$REPO_EFI_DEFAULT")"
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         -n|--name)
@@ -232,6 +243,9 @@ while [[ $# -gt 0 ]]; do
         --efi)
             UEFI_FIRMWARE="$2"
             shift 2
+            ;;
+        --config|-f)
+            shift 2 # already resolved above
             ;;
         -h|--help)
             usage
@@ -372,14 +386,15 @@ main() {
         qemu_cmd="qemu-system-aarch64"
         common_opts+=(
             -machine virt,highmem=on
-            -accel hvf
             -cpu host
             -bios "$UEFI_FIRMWARE"
             -device virtio-gpu-pci
         )
         if [[ "$os" == "linux" ]]; then
+            common_opts+=(-accel kvm)
             common_opts+=(-display gtk,grab-on-hover=on)
         else
+            common_opts+=(-accel hvf)
             common_opts+=(-display cocoa)
         fi
     fi
