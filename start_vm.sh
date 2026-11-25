@@ -14,6 +14,11 @@
 #   -c, --cpus N         Number of CPU cores (default: 2)
 #   -p, --ssh-port PORT  SSH port forwarding (default: 2222)
 #   -d, --shared-dir DIR Directory to mount in VM (can be specified multiple times)
+#   -e, --expose SPEC    Forward a host port to a guest port (can be specified
+#                        multiple times). SPEC: [tcp:|udp:]HOST[:GUEST]
+#                        e.g. 8080:80, 5353 (same port), udp:6000:6000
+#       --internet       Allow the VM to reach the host network and internet.
+#                        Default: isolated (only forwarded ports are reachable).
 #       --efi PATH       Path to EFI/UEFI firmware (QEMU_EFI.fd).
 #                        Default: ./efi/QEMU_EFI.fd (relative to script directory)
 #   --config PATH, -f    YAML config profile to load defaults from.
@@ -26,6 +31,7 @@
 #   ./start_vm.sh images/ubuntu-cse3320/ubuntu-example.qcow2 -n mytest -m 8192
 #   ./start_vm.sh images/ubuntu-cse3320/ubuntu-example.qcow2 --efi ./efi/QEMU_EFI.fd
 #   ./start_vm.sh images/ubuntu-cse3320/ubuntu-example.qcow2 -d ~/myfiles -d ~/projects
+#   ./start_vm.sh images/ubuntu-cse3320/ubuntu-example.qcow2 --internet -e 8080:80 -e 3000
 
 set -euo pipefail
 
@@ -42,6 +48,7 @@ REPO_EFI_DEFAULT="$SCRIPT_DIR/efi/QEMU_EFI.fd"
 
 # Defaults (overridden below by config profile, then by CLI flags)
 SHARED_DIRS=()
+CLI_EXPOSE_PORTS=()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper functions
@@ -187,6 +194,41 @@ validate_ssh_port() {
     fi
 }
 
+# validate_expose_ports
+# Checks every EXPOSE_PORTS entry against [tcp:|udp:]HOST[:GUEST] and port range.
+validate_expose_ports() {
+    local spec port failed=0
+    for spec in "${EXPOSE_PORTS[@]}"; do
+        if ! [[ "$spec" =~ ^((tcp|udp):)?([0-9]+)(:([0-9]+))?$ ]]; then
+            log_error "Invalid --expose value: $spec (expected [tcp:|udp:]HOST[:GUEST])"
+            ((failed+=1))
+            continue
+        fi
+        for port in "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]}"; do
+            if [[ -n "$port" ]] && ((port < 1 || port > 65535)); then
+                log_error "Port out of range in --expose $spec (valid range: 1-65535)"
+                ((failed+=1))
+            fi
+        done
+    done
+    if ((failed > 0)); then
+        exit 1
+    fi
+}
+
+# expose_to_hostfwd SPEC
+# Converts [tcp:|udp:]HOST[:GUEST] into a QEMU hostfwd rule, e.g. 8080:80 -> tcp::8080-:80.
+expose_to_hostfwd() {
+    local spec=$1 proto=tcp host guest
+    if [[ "$spec" == tcp:* || "$spec" == udp:* ]]; then
+        proto=${spec%%:*}
+        spec=${spec#*:}
+    fi
+    host=${spec%%:*}
+    guest=${spec#*:}
+    printf '%s::%s-:%s' "$proto" "$host" "$guest"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Parse arguments (positional image first; options after)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +259,8 @@ MEMORY="$(cfg_get memory 4096)"
 CPUS="$(cfg_get cpus 2)"
 SSH_PORT="$(cfg_get ssh_port 2222)"
 UEFI_FIRMWARE="$(cfg_get efi "$REPO_EFI_DEFAULT")"
+INTERNET="$(cfg_get_bool internet 0)"
+mapfile -t EXPOSE_PORTS < <(cfg_get_list expose)
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -240,6 +284,14 @@ while [[ $# -gt 0 ]]; do
             SHARED_DIRS+=("$2")
             shift 2
             ;;
+        -e|--expose)
+            CLI_EXPOSE_PORTS+=("$2")
+            shift 2
+            ;;
+        --internet)
+            INTERNET=1
+            shift
+            ;;
         --efi)
             UEFI_FIRMWARE="$2"
             shift 2
@@ -256,6 +308,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# CLI --expose replaces the config list rather than appending to it
+if [[ ${#CLI_EXPOSE_PORTS[@]} -gt 0 ]]; then
+    EXPOSE_PORTS=("${CLI_EXPOSE_PORTS[@]}")
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
@@ -277,6 +334,9 @@ main() {
     if [[ ${#SHARED_DIRS[@]} -gt 0 ]]; then
         validate_shared_dirs
     fi
+    if [[ ${#EXPOSE_PORTS[@]} -gt 0 ]]; then
+        validate_expose_ports
+    fi
 
     if [[ ! -f "$IMAGE_PATH" ]]; then
         log_error "Image not found: $IMAGE_PATH"
@@ -294,6 +354,14 @@ main() {
     echo "    Memory:         ${MEMORY}MB"
     echo "    CPUs:           $CPUS"
     echo "    SSH Port:       $SSH_PORT"
+    if [[ "$INTERNET" == "1" ]]; then
+        echo "    Internet:       enabled"
+    else
+        echo "    Internet:       disabled (use --internet to enable)"
+    fi
+    if [[ ${#EXPOSE_PORTS[@]} -gt 0 ]]; then
+        echo "    Exposed ports:  ${EXPOSE_PORTS[*]}"
+    fi
     echo ""
     printf "  ${CYAN}Paths:${NC}\n"
     echo "    Disk image:     $IMAGE_PATH"
@@ -331,6 +399,14 @@ main() {
     echo ""
     echo "  SSH access (after boot):  ssh -p $SSH_PORT user@localhost"
     echo ""
+    if [[ ${#EXPOSE_PORTS[@]} -gt 0 ]]; then
+        echo "  Exposed ports (host -> guest):"
+        local spec
+        for spec in "${EXPOSE_PORTS[@]}"; do
+            echo "    $(expose_to_hostfwd "$spec")"
+        done
+        echo ""
+    fi
     if [[ ${#SHARED_DIRS[@]} -gt 0 ]]; then
         echo "  Mount shared directories:"
         local idx=0
@@ -348,13 +424,22 @@ main() {
     echo ""
 
     # Build QEMU command
+    # restrict=on cuts the guest off from the host and internet; hostfwd rules still work
+    local netdev="user,id=net0,hostfwd=tcp::${SSH_PORT}-:22"
+    for spec in "${EXPOSE_PORTS[@]}"; do
+        netdev+=",hostfwd=$(expose_to_hostfwd "$spec")"
+    done
+    if [[ "$INTERNET" != "1" ]]; then
+        netdev+=",restrict=on"
+    fi
+
     local qemu_cmd
     local common_opts=(
         -name "$VM_NAME"
         -m "$MEMORY"
         -smp "$CPUS,cores=$CPUS"
         -drive "file=$IMAGE_PATH,format=qcow2,if=virtio,cache=writeback"
-        -netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22"
+        -netdev "$netdev"
         -device virtio-net-pci,netdev=net0
         -device qemu-xhci
         -device usb-kbd

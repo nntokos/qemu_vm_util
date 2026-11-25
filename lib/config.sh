@@ -69,3 +69,15 @@ cfg_get_bool() {
     *)     printf '%s' "$default" ;;
   esac
 }
+
+# cfg_get_list KEY
+# Prints each item of the YAML list at ".$CONFIG_SECTION.KEY" (falling back
+# to ".common.KEY") on its own line. Prints nothing if unset or unavailable.
+cfg_get_list() {
+  local key="$1"
+
+  [[ -n "${CONFIG_FILE:-}" ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+
+  yq eval "(.${CONFIG_SECTION}.${key} // .common.${key} // [])[]" "$CONFIG_FILE" 2>/dev/null || true
+}

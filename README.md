@@ -108,8 +108,19 @@ Available options:
 	•	--memory MB / -m – RAM in MB (default: 4096)
 	•	--cpus N / -c – Number of vCPUs (default: 2)
 	•	--ssh-port N / -p – Host port forwarded to guest SSH (default: 2222)
+	•	--expose SPEC / -e – Forward a host port to a guest port, repeatable. SPEC is `[tcp:|udp:]HOST[:GUEST]` (e.g. `8080:80`, `3000`, `udp:6000:6000`)
+	•	--internet – Allow the VM to reach the host network and internet (default: isolated)
 	•	--efi PATH – EFI/UEFI firmware path (arm64 only)
 	•	--config PATH / -f PATH – YAML config profile to load defaults from (see [Config profiles](#config-profiles))
+
+### Networking
+The VM uses QEMU user-mode networking. By default it is isolated (`restrict=on`): it cannot reach
+the host or the internet, but the SSH port and any `--expose` ports remain reachable from the host.
+Pass `--internet` to lift the restriction.
+
+```sh
+./start_vm.sh ./ubuntu24/ubuntu24.qcow2 --internet -e 8080:80 -e 3000
+```
 
 ## 4. Stop the VM
 To stop the VM safely:
@@ -193,6 +204,8 @@ create_vm:   # create_vm.sh-only keys (override common: for the same key)
 
 start_vm:    # start_vm.sh-only keys (override common: for the same key)
   memory: 8192
+  internet: true
+  expose: ["8080:80", "3000"]   # CLI --expose replaces this list
 ```
 
 Requires `yq` (mikefarah/yq, installed by `install_deps.sh`). If `yq` isn't on `PATH`,

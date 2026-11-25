@@ -29,3 +29,5 @@ start_vm:
   cpus: null
   ssh_port: null
   efi: null
+  internet: null   # true allows host/internet access (default: isolated)
+  expose: null     # list of [tcp:|udp:]HOST[:GUEST], e.g. ["8080:80", "3000"]
