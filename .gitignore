@@ -7,3 +7,6 @@
 # Large images
 *.iso
 *.qcow2
+
+# Local apt repository built by provision/fetch_packages.sh
+provision/repo/

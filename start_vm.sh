@@ -3,13 +3,14 @@
 # start_vm.sh - Boot a VM from an existing disk image (no cloning)
 #
 # Usage:
-#   ./start_vm.sh <image.qcow2> [options]
+#   ./start_vm.sh <vm_name | image.qcow2> [options]
 #
 # Positional:
-#   image.qcow2          Path to an existing qcow2 disk image to boot (required)
+#   vm_name              Name given to create_vm.sh; boots images/<vm_name>.qcow2
+#   image.qcow2          Or a path to any existing qcow2 disk image
 #
 # Options:
-#   -n, --name NAME      Name for the VM (default: test-$(timestamp))
+#   -n, --name NAME      Name for the VM (default: disk file name without .qcow2)
 #   -m, --memory MB      Memory in MB (default: 4096)
 #   -c, --cpus N         Number of CPU cores (default: 2)
 #   -p, --ssh-port PORT  SSH port forwarding (default: 2222)
@@ -19,19 +20,22 @@
 #                        e.g. 8080:80, 5353 (same port), udp:6000:6000
 #       --internet       Allow the VM to reach the host network and internet.
 #                        Default: isolated (only forwarded ports are reachable).
+#   -r, --resolution WxH Guest screen resolution, which sets the window size
+#                        (default: 1280x800). On Retina screens the window is half
+#                        that size in points; use 2560x1600 for a 1280x800 window.
 #       --efi PATH       Path to EFI/UEFI firmware (QEMU_EFI.fd).
-#                        Default: ./efi/QEMU_EFI.fd (relative to script directory)
+#                        Default: the firmware shipped with QEMU, else ./efi/QEMU_EFI.fd
 #   --config PATH, -f    YAML config profile to load defaults from.
 #                        Default: ./config/default.yaml if present.
 #                        CLI flags always override the config file.
 #   -h, --help           Show this help message
 #
 # Example:
-#   ./start_vm.sh images/ubuntu-cse3320/ubuntu-example.qcow2
-#   ./start_vm.sh images/ubuntu-cse3320/ubuntu-example.qcow2 -n mytest -m 8192
-#   ./start_vm.sh images/ubuntu-cse3320/ubuntu-example.qcow2 --efi ./efi/QEMU_EFI.fd
-#   ./start_vm.sh images/ubuntu-cse3320/ubuntu-example.qcow2 -d ~/myfiles -d ~/projects
-#   ./start_vm.sh images/ubuntu-cse3320/ubuntu-example.qcow2 --internet -e 8080:80 -e 3000
+#   ./start_vm.sh ubuntu24
+#   ./start_vm.sh ubuntu24 -n mytest -m 8192
+#   ./start_vm.sh images/ubuntu24.qcow2 --efi ./efi/QEMU_EFI.fd
+#   ./start_vm.sh ubuntu24 -d ~/myfiles -d ~/projects
+#   ./start_vm.sh ubuntu24 --internet -e 8080:80 -e 3000
 
 set -euo pipefail
 
@@ -42,9 +46,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/config.sh
 source "$SCRIPT_DIR/lib/config.sh"
-
-# EFI default (repo-first)
-REPO_EFI_DEFAULT="$SCRIPT_DIR/efi/QEMU_EFI.fd"
+# shellcheck source=lib/efi.sh
+source "$SCRIPT_DIR/lib/efi.sh"
 
 # Defaults (overridden below by config profile, then by CLI flags)
 SHARED_DIRS=()
@@ -121,11 +124,10 @@ check_dependencies() {
         fi
     fi
 
-    # Check UEFI firmware for ARM (repo-first default, user-overridable via --efi)
     if [[ "$arch" == "arm64" ]]; then
         if [[ ! -f "$UEFI_FIRMWARE" ]]; then
-            log_error "UEFI firmware not found: $UEFI_FIRMWARE"
-            log_error "Provide it via --efi <path> or place it at: $REPO_EFI_DEFAULT"
+            log_error "UEFI firmware not found: ${UEFI_FIRMWARE:-none detected}"
+            log_error "Install QEMU's EDK2 firmware or provide it via --efi <path>"
             exit 1
         fi
     fi
@@ -241,25 +243,30 @@ for arg in "$@"; do
 done
 
 if [[ $# -lt 1 ]]; then
-    log_error "Missing required positional argument: <image.qcow2>"
+    log_error "Missing required positional argument: <vm_name | image.qcow2>"
     echo ""
     usage
 fi
 
 IMAGE_PATH="$1"
 shift
+# A bare VM name resolves to the disk create_vm.sh made for it
+if [[ ! -f "$IMAGE_PATH" && -f "$SCRIPT_DIR/images/$IMAGE_PATH.qcow2" ]]; then
+    IMAGE_PATH="$SCRIPT_DIR/images/$IMAGE_PATH.qcow2"
+fi
 
 CONFIG_FILE="$(resolve_config_file "$SCRIPT_DIR/config/default.yaml" "$@")"
 CONFIG_SECTION="start_vm"
 [[ -n "$CONFIG_FILE" ]] && log_info "Using config profile: $CONFIG_FILE"
 
 # Defaults (config profile overrides these; CLI flags override the config profile)
-VM_NAME="$(cfg_get name "test-$(date +%Y%m%d-%H%M%S)")"
+VM_NAME="$(cfg_get name "$(basename "$IMAGE_PATH" .qcow2)")"
 MEMORY="$(cfg_get memory 4096)"
 CPUS="$(cfg_get cpus 2)"
 SSH_PORT="$(cfg_get ssh_port 2222)"
-UEFI_FIRMWARE="$(cfg_get efi "$REPO_EFI_DEFAULT")"
+UEFI_FIRMWARE="$(cfg_get efi "$(find_efi_firmware)")"
 INTERNET="$(cfg_get_bool internet 0)"
+RESOLUTION="$(cfg_get resolution 1280x800)"
 mapfile -t EXPOSE_PORTS < <(cfg_get_list expose)
 
 while [[ $# -gt 0 ]]; do
@@ -291,6 +298,10 @@ while [[ $# -gt 0 ]]; do
         --internet)
             INTERNET=1
             shift
+            ;;
+        -r|--resolution)
+            RESOLUTION="$2"
+            shift 2
             ;;
         --efi)
             UEFI_FIRMWARE="$2"
@@ -331,6 +342,11 @@ main() {
     validate_memory "$MEMORY"
     validate_cpus "$CPUS"
     validate_ssh_port "$SSH_PORT"
+    if ! [[ "$RESOLUTION" =~ ^([1-9][0-9]*)x([1-9][0-9]*)$ ]]; then
+        log_error "Resolution must be WIDTHxHEIGHT, e.g. 1920x1080, got: $RESOLUTION"
+        exit 1
+    fi
+    local gpu_res="xres=${BASH_REMATCH[1]},yres=${BASH_REMATCH[2]}"
     if [[ ${#SHARED_DIRS[@]} -gt 0 ]]; then
         validate_shared_dirs
     fi
@@ -339,7 +355,7 @@ main() {
     fi
 
     if [[ ! -f "$IMAGE_PATH" ]]; then
-        log_error "Image not found: $IMAGE_PATH"
+        log_error "Image not found: $IMAGE_PATH (also looked for $SCRIPT_DIR/images/$IMAGE_PATH.qcow2)"
         exit 1
     fi
 
@@ -353,6 +369,7 @@ main() {
     echo "    Name:           $VM_NAME"
     echo "    Memory:         ${MEMORY}MB"
     echo "    CPUs:           $CPUS"
+    echo "    Resolution:     $RESOLUTION"
     echo "    SSH Port:       $SSH_PORT"
     if [[ "$INTERNET" == "1" ]]; then
         echo "    Internet:       enabled"
@@ -458,7 +475,7 @@ main() {
         qemu_cmd="qemu-system-x86_64"
         common_opts+=(
             -cpu host
-            -vga virtio
+            -device "virtio-vga,$gpu_res"
         )
         if [[ "$os" == "linux" ]]; then
             common_opts+=(-enable-kvm)
@@ -473,7 +490,7 @@ main() {
             -machine virt,highmem=on
             -cpu host
             -bios "$UEFI_FIRMWARE"
-            -device virtio-gpu-pci
+            -device "virtio-gpu-pci,$gpu_res"
         )
         if [[ "$os" == "linux" ]]; then
             common_opts+=(-accel kvm)

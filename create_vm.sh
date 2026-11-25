@@ -13,26 +13,34 @@ fail()  { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/config.sh
 source "$SCRIPT_DIR/lib/config.sh"
+# shellcheck source=lib/efi.sh
+source "$SCRIPT_DIR/lib/efi.sh"
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./create-vm.sh <path/to/os.iso> <vm_name> [options]
+  ./create_vm.sh <path/to/os.iso> <vm_name> [options]
+  ./create_vm.sh <vm_name> --base IMAGE [--copy]
 
-Required positional args:
-  1) ISO path     Path to a bootable ISO (Ubuntu Desktop/Server, etc.)
-  2) VM name      Name for the VM directory + disk file
+Positional args:
+  ISO path        Path to a bootable ISO (Ubuntu Desktop/Server, etc.). Omitted with --base.
+  VM name         Name for the disk file (images/<vm_name>.qcow2)
 
 Options:
   --disk-gb N         Disk size in GB (default: 32)
   --ram-mb N          RAM in MB (default: 4096)
   --cpus N            vCPU count (default: 4)
   --efi PATH          Path to EFI/UEFI firmware (QEMU_EFI.fd). Overrides default + auto-detection.
-                      Default behavior: use ./efi/QEMU_EFI.fd if present, otherwise auto-detect.
+                      Default: the firmware shipped with QEMU, else ./efi/QEMU_EFI.fd.
   --autoinstall-iso P Path to a prebuilt autoinstall/seed ISO to attach as 2nd CD-ROM
   --no-accel          Force pure emulation (TCG), even if KVM/HVF is available
   --headless          No GUI window (uses serial console); best for servers
   --ssh-port N        Host port forwarded to guest 22 (default: 2222)
+  --base IMAGE        Create the disk from an existing image (a name in images/ or a path)
+                      instead of installing from an ISO. Creates the disk and exits.
+                      Default: a copy-on-write overlay. Never modify IMAGE afterwards,
+                      or every overlay built on it is corrupted.
+  --copy              With --base: make an independent full copy instead of an overlay
   --config PATH       YAML config profile to load defaults from (-f also works).
                       Default: ./config/default.yaml if present.
                       CLI flags always override the config file.
@@ -42,7 +50,7 @@ What this script does:
   • Detects host OS + CPU architecture (x86_64 vs arm64/aarch64)
   • Chooses the correct QEMU binary (qemu-system-x86_64 or qemu-system-aarch64)
   • Uses KVM (Linux) or HVF (macOS) if available, unless --no-accel is set
-  • Creates ./<vm_name>/<vm_name>.qcow2 if missing
+  • Creates images/<vm_name>.qcow2 (in the repo) if missing
   • Boots the installer ISO and attaches the optional autoinstall ISO if provided
   • User-mode networking with SSH forward: host localhost:<ssh-port> -> guest 22
 
@@ -55,10 +63,14 @@ EOF
 
 # Parse required positional args
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && usage && exit 0
-[[ $# -lt 2 ]] && usage && exit 1
+BASE=""
+[[ " $* " == *" --base "* ]] && BASE_MODE=1 || BASE_MODE=0
+[[ $# -lt $((2 - BASE_MODE)) ]] && usage && exit 1
 
-ISO="$1"; shift
+ISO=""
+[[ "$BASE_MODE" -eq 0 ]] && { ISO="$1"; shift; }
 VMNAME="$1"; shift
+COPY=0
 
 CONFIG_FILE="$(resolve_config_file "$SCRIPT_DIR/config/default.yaml" "$@")"
 CONFIG_SECTION="create_vm"
@@ -70,7 +82,6 @@ RAM_MB="$(cfg_get ram_mb 4096)"
 CPUS="$(cfg_get cpus 4)"
 AUTOINSTALL_ISO="$(cfg_get autoinstall_iso "")"
 EFI_FIRMWARE="$(cfg_get efi "")"
-REPO_EFI="./efi/QEMU_EFI.fd"
 NO_ACCEL="$(cfg_get_bool no_accel 0)"
 HEADLESS="$(cfg_get_bool headless 0)"
 SSH_PORT="$(cfg_get ssh_port 2222)"
@@ -86,12 +97,40 @@ while [[ $# -gt 0 ]]; do
     --no-accel) NO_ACCEL=1;;
     --headless) HEADLESS=1;;
     --ssh-port) shift; SSH_PORT="${1:-}";;
+    --base) shift; BASE="${1:-}";;
+    --copy) COPY=1;;
     --config|-f) shift;; # already resolved above
     -h|--help) usage; exit 0;;
     *) fail "Unknown option: $1 (use --help)";;
   esac
   shift || true
 done
+
+VMDIR="$SCRIPT_DIR/images"
+DISK="$VMDIR/$VMNAME.qcow2"
+
+if [[ "$BASE_MODE" -eq 1 ]]; then
+  [[ -n "$BASE" ]] || fail "--base requires an image name or path"
+  [[ ! -f "$BASE" && -f "$VMDIR/$BASE.qcow2" ]] && BASE="$VMDIR/$BASE.qcow2"
+  [[ -f "$BASE" ]] || fail "Base image not found: $BASE (also looked for $VMDIR/$BASE.qcow2)"
+  [[ -e "$DISK" ]] && fail "Disk already exists: $DISK"
+  command -v qemu-img >/dev/null 2>&1 || fail "Missing qemu-img (install qemu-utils / qemu)."
+  BASE="$(cd "$(dirname "$BASE")" && pwd)/$(basename "$BASE")"
+  mkdir -p "$VMDIR"
+  if [[ "$COPY" -eq 1 ]]; then
+    info "Copying $BASE -> $DISK"
+    qemu-img convert -p -O qcow2 "$BASE" "$DISK"
+  else
+    # A relative backing path keeps overlays valid when the repo is moved
+    BACKING="$BASE"
+    [[ "$(dirname "$BASE")" == "$VMDIR" ]] && BACKING="$(basename "$BASE")"
+    info "Creating overlay $DISK on $BASE"
+    qemu-img create -f qcow2 -F qcow2 -b "$BACKING" "$DISK" >/dev/null
+  fi
+  ok "Disk created. Start it with: ./start_vm.sh $VMNAME"
+  exit 0
+fi
+[[ "$COPY" -eq 0 ]] || fail "--copy requires --base"
 
 [[ -f "$ISO" ]] || fail "ISO not found: $ISO"
 [[ "$DISK_GB" =~ ^[0-9]+$ ]] || fail "--disk-gb must be an integer"
@@ -155,9 +194,6 @@ else
   fi
 fi
 
-# VM paths
-VMDIR="./images"
-DISK="$VMDIR/$VMNAME.qcow2"
 mkdir -p "$VMDIR"
 
 if [[ ! -f "$DISK" ]]; then
@@ -212,37 +248,14 @@ else
     CPU_ARGS=(-cpu cortex-a57)
   fi
 
-  # EFI / UEFI firmware handling (AArch64):
-  # Priority:
-  #   1) --efi PATH
-  #   2) ./efi/QEMU_EFI.fd (repo default)
-  #   3) auto-detect common system locations
+  # -bios loads firmware of any size; pflash would require a 64 MB image
+  [[ -n "$EFI_FIRMWARE" ]] || EFI_FIRMWARE="$(find_efi_firmware)"
   if [[ -n "$EFI_FIRMWARE" ]]; then
-    info "Using user-specified EFI firmware: $EFI_FIRMWARE"
-    UEFI_ARGS=(-drive if=pflash,format=raw,readonly=on,file="$EFI_FIRMWARE")
-
-  elif [[ -f "$REPO_EFI" ]]; then
-    info "Using repo EFI firmware: $REPO_EFI"
-    UEFI_ARGS=(-drive if=pflash,format=raw,readonly=on,file="$REPO_EFI")
-
+    info "Using EFI firmware: $EFI_FIRMWARE"
+    UEFI_ARGS=(-bios "$EFI_FIRMWARE")
   else
-    for fw in \
-      /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
-      /usr/share/edk2/aarch64/QEMU_EFI.fd \
-      /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
-      /usr/local/share/qemu/edk2-aarch64-code.fd
-    do
-      if [[ -f "$fw" ]]; then
-        info "Using auto-detected EFI firmware: $fw"
-        UEFI_ARGS=(-drive if=pflash,format=raw,readonly=on,file="$fw")
-        break
-      fi
-    done
-
-    if [[ ${#UEFI_ARGS[@]} -eq 0 ]]; then
-      info "No EFI firmware found. Some ARM64 ISOs may not boot."
-      info "Tip: place firmware at ./efi/QEMU_EFI.fd or pass --efi <path>"
-    fi
+    info "No EFI firmware found. Some ARM64 ISOs may not boot."
+    info "Tip: install QEMU's EDK2 firmware or pass --efi <path>"
   fi
 fi
 

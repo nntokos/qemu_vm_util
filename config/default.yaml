@@ -31,3 +31,4 @@ start_vm:
   efi: null
   internet: null   # true allows host/internet access (default: isolated)
   expose: null     # list of [tcp:|udp:]HOST[:GUEST], e.g. ["8080:80", "3000"]
+  resolution: null # WIDTHxHEIGHT, e.g. 1920x1080 (default: 1280x800)

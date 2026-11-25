@@ -1,0 +1,10 @@
+# Packages for provision/fetch_packages.sh and provision/provision.sh,
+# one or more per line.
+openssh-server
+curl
+git
+vim
+htop
+build-essential
+net-tools
+rsync
